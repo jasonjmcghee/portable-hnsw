@@ -10,24 +10,15 @@ from tqdm import tqdm
 
 @nb.njit()
 def _distance(data_matrix, node_data):
-    """
-    Compute distances using Numba for JIT compilation and parallel execution.
-    """
     return np.linalg.norm(data_matrix - node_data)
 
 @nb.njit(parallel=False, cache=True)
 def _square_distance(data_matrix, node_data):
-    """
-    Compute distances using Numba for JIT compilation and parallel execution.
-    """
     diff = data_matrix - node_data
     return np.dot(diff, diff)
 
 @nb.njit(parallel=False, cache=True)
 def _square_distances(data_matrix, node_data):
-    """
-    Compute distances using Numba for JIT compilation and parallel execution.
-    """
     # Pre-allocate an array for distances
     distances = np.empty(data_matrix.shape[0], dtype=np.float32)
     
@@ -39,16 +30,10 @@ def _square_distances(data_matrix, node_data):
     return distances
 
 def save_to_parquet(df, file_name):
-    """
-    Saves the DataFrame to a Parquet file.
-    """
     table = pa.Table.from_pandas(df)
     pq.write_table(table, file_name)
 
 class HNSWNode:
-    """
-    Represents a node in the HNSW graph.
-    """
     def __init__(self, data, id):
         self.data = data
         self.id = id
@@ -57,17 +42,8 @@ class HNSWNode:
 class HNSWIndex:
     """
     Hierarchical Navigable Small World (HNSW) Index for efficient Approximate Nearest Neighbor (ANN) search.
-    
-    Attributes:
-        dim (int): Dimensionality of the data points.
-        M (int): Maximum number of edges per node (controls the graph connectivity).
-        ef_construction (int): Size of the dynamic candidate list used during insertion (higher values lead to more accurate but slower construction).
-        max_elements (int): Maximum number of elements the index can hold.
-        nodes (list): List of nodes in the HNSW graph.
-        data_matrix (numpy.ndarray): Matrix of data points added to the index.
-        max_layer (int): Maximum number of layers in the HNSW graph. Logarithmically dependent on `max_elements`.
-    
-    The HNSW algorithm creates a layered graph structure for efficient search in high-dimensional spaces.
+
+    Kind of.
     """
     def __init__(self, dim, M=16, ef_construction=200, max_elements=10000):
         self.dim = dim  # Dimensionality of the data points.
@@ -86,12 +62,7 @@ class HNSWIndex:
     
     def add_items(self, data):
         """
-        Adds multiple items (data points) to the HNSW index.
-    
-        Args:
-            data (iterable): An iterable of data points to be added to the index.
-        
-        This method iterates through the provided data points and inserts each into the index.
+        Add stuff.
         """
         for d in tqdm(data):
             if self.current_size < self.max_elements:
@@ -106,19 +77,12 @@ class HNSWIndex:
 
     def _insert_node(self, data):
         """
-        Inserts a single data point into the HNSW index.
-
-        Args:
-            data (list or numpy.ndarray): A single data point to be inserted into the index.
-        
-        This private method handles the insertion of a single data point into the graph,
-        updating the data matrix and assigning neighbors to the new node.
+        Insert a single data point into the graph,
+        update the data matrix and assign neighbors to the new node.
         """
         node_id = len(self.nodes)
         node = HNSWNode(data, node_id)
         self.nodes.append(node)
-
-        # Add data to list instead of updating data_matrix directly
         self.data_list.append(data)
 
         node_layer = min(self.max_layer, int(-np.log(np.random.random()) / np.log(2)))
@@ -141,15 +105,7 @@ class HNSWIndex:
 
     def _search_layer(self, target_node, entry_node, layer):
         """
-        Greedy search to find the closest node to the target node in a given layer.
-    
-        Args:
-            target_node (HNSWNode): The target node we are finding neighbors for.
-            entry_node (HNSWNode): The entry node from where the search starts.
-            layer (int): The layer of the graph at which the search is conducted.
-    
-        Returns:
-            HNSWNode: The closest node to the target node in this layer.
+        Find the closest node to the target node in a given layer.
         """
         current_node = entry_node
         # set the cached distance for the first time
@@ -223,18 +179,10 @@ class HNSWIndex:
         
     def knn_query(self, query_data, k, ef=10):
         """
-        Performs a k-NN (k-nearest neighbors) query on the HNSW index.
-
-        Args:
-            query_data (list or numpy.ndarray): The query data point.
-            k (int): The number of nearest neighbors to find.
-            ef (int, optional): The size of the dynamic candidate list during the search. Defaults to max(k, ef_construction).
-
-        Returns:
-            tuple: A tuple containing two lists - IDs of the k nearest neighbors and their corresponding distances.
-
-        This method performs a layered search for the nearest neighbors of the given query point,
+        Layered search for the nearest neighbors of the given query point,
         starting from the top layer and gradually moving to the lower layers.
+
+        We don't really need this as we're using client side, but useful for testing.
         """
         if ef is None:
             ef = max(k, self.ef_construction)  # Ensures that ef is at least as large as k.
@@ -271,6 +219,9 @@ class HNSWIndex:
         return list(labels), list(distances)
 
 def serialize_hnsw_to_tables_v2(hnsw_index):
+    """
+    Our serializable format
+    """
     nodes_data = []
     edges_data = []
 
