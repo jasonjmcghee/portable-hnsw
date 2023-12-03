@@ -97,6 +97,11 @@
             path,
             ef = 10
         ) {
+            await db.registerFileURL('remote.parquet', `${path}/nodes.parquet`, duckdb.DuckDBDataProtocol.HTTP, false);
+            await db.registerFileURL('edges.parquet', `${path}/edges.parquet`, duckdb.DuckDBDataProtocol.HTTP, false);
+            await db.registerFileURL('docs.parquet', `${path}/docs.parquet`, duckdb.DuckDBDataProtocol.HTTP, false);
+
+
             const origData = queryData;
             const conn = await db.connect();
 
