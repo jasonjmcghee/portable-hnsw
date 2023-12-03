@@ -17,6 +17,7 @@
             justify-content: center;
             flex-direction: column;
             max-width: 1000px;
+            width: 100%;
             gap: 20px;
         }
         .query {
@@ -24,19 +25,30 @@
             justify-content: center;
             gap: 12px;
         }
+        #text-input {
+            flex-grow: 1;
+        }
+        .path-input {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        #path {
+            flex-grow: 1;
+        }
     </style>
 </head>
 
 <body>
     <main class="container">
         <div class="inner">
-            <div>
-                Path: <input type="text" id="path" value="http://localhost:8000/notw"></input>
+            <div class="path-input">
+                Path: <input type="text" id="path" value="https://jasonjmcghee.github.io/portable-hnsw/blogs"></input>
             </div>
             <div>
                 <div class="query">
                     <textarea id="text-input">falling in love</textarea>
-                    <button id="search">Search</button>
+                    <button disabled id="search">Search</button>
                 </div>
             <p id="status"></p>
             </div>
@@ -55,11 +67,14 @@
         const search = document.getElementById('search');
         const output = document.getElementById('output');
         const path = document.getElementById('path');
+        let cachedPath = "";
+        let conn = null;
 
         // Create a new object detection pipeline
-        status.textContent = 'Loading model...';
+        status.textContent = 'Loading embedding model...';
         const extractor = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
-        status.textContent = 'Ready';
+        status.textContent = '';
+        search.disabled = false;
 
         import * as duckdb from 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/+esm';
 
@@ -80,7 +95,7 @@
         await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
         URL.revokeObjectURL(worker_url);
 
-        function euclideanDistance(arr1, arr2) {
+        function euclideanDistanceSquared(arr1, arr2) {
             if (arr1.length !== arr2.length) {
                 throw new Error("Arrays must be of the same length");
             }
@@ -88,38 +103,40 @@
             for (let i = 0; i < arr1.length; i++) {
                 sum += (arr1[i] - arr2[i]) ** 2;
             }
-            return Math.sqrt(sum);
+            return sum;
         }
 
         async function searchWithSql(
+            conn,
             queryData,
             k,
             path,
             ef = 10
         ) {
-            await db.registerFileURL('remote.parquet', `${path}/nodes.parquet`, duckdb.DuckDBDataProtocol.HTTP, false);
-            await db.registerFileURL('edges.parquet', `${path}/edges.parquet`, duckdb.DuckDBDataProtocol.HTTP, false);
+            status.textContent = 'Searching HNSW Index...';
+
             await db.registerFileURL('docs.parquet', `${path}/docs.parquet`, duckdb.DuckDBDataProtocol.HTTP, false);
 
+            const cache = {};
 
-            const origData = queryData;
-            const conn = await db.connect();
-
-            const countQuery = `SELECT COUNT(node_id) FROM read_parquet('${path}/nodes.parquet')`;
+            const countQuery = `SELECT COUNT(node_id) FROM nodes.parquet`;
             const countResult = await conn.query(countQuery);
-            const count = countResult.toArray().map(([count, _]) => count[1])[0].value;
+            const countArrayed = countResult.toArray().map(([count, _]) => count[1]);
+            const count = JSON.parse(countArrayed[0].toString());
 
             const maxLayer = count > 0 ? Math.floor(Math.log2(count)) : 0;
 
             const initNodeQuery = `
                 SELECT n.node_id, n.data as node_data
-                FROM read_parquet('${path}/nodes.parquet') n
+                FROM nodes.parquet n
                 ORDER BY RANDOM() LIMIT 1
             `;
             let currentBest = await conn.query(initNodeQuery);
-            currentBest = currentBest.toArray().map(([nId, data]) => ([nId[1], euclideanDistance(data[1].data[0].values, queryData)]))
+            currentBest = currentBest.toArray().map(([nId, data]) => ([nId[1], euclideanDistanceSquared(data[1].data[0].values, queryData)]))
 
             for (let layer = maxLayer; layer >= 0; layer--) {
+                status.textContent = `Searching HNSW Index: ${layer + 1} layers remaining...`;
+
                 let improved = true;
                 while (improved) {                    
                     improved = false;
@@ -127,24 +144,23 @@
                     const candidates = new Set(currentNodeIds);
                     const newCandidates = new Set();
 
-                    const sqlSafeCandidates = Array.from(candidates).join(',');
+                    const filteredCandidates = Array.from(candidates).filter(nodeId => !cache[nodeId] || !cache[nodeId][layer]);
 
-                    // Create temp_candidates table
-                    const createTempCandidatesQuery = `
-                        DROP TABLE IF EXISTS temp_candidates;
-                        CREATE TEMP TABLE temp_candidates AS
-                        SELECT UNNEST(ARRAY[${sqlSafeCandidates}]) AS node_id;
-                    `;
-                    await conn.query(createTempCandidatesQuery);
+                    if (filteredCandidates.length === 0) {
+                        continue;
+                    }
+
+                    const sqlSafeFilteredCandidates = filteredCandidates.join(',');
+                    const sqlSafeCandidates = [...candidates, ...Object.keys(cache)].join(',');
 
                     // Create filtered_edges table
                     const createFilteredEdgesQuery = `
                         DROP TABLE IF EXISTS filtered_edges;
                         CREATE TEMP TABLE filtered_edges AS
-                        SELECT * FROM read_parquet('${path}/edges.parquet')
-                        WHERE source_node_id IN (SELECT node_id FROM temp_candidates)
+                        SELECT * FROM edges.parquet
+                        WHERE source_node_id IN (${sqlSafeFilteredCandidates})
                         AND layer = ${layer}
-                        AND target_node_id NOT IN (SELECT node_id FROM temp_candidates);
+                        AND target_node_id NOT IN (${sqlSafeCandidates});
                     `;
                     await conn.query(createFilteredEdgesQuery);
 
@@ -153,10 +169,8 @@
                         SELECT 
                             e.target_node_id as node_id, 
                             n.data as node_data
-                        FROM 
-                            read_parquet('${path}/nodes.parquet') n
-                        INNER JOIN 
-                            filtered_edges e ON n.node_id = e.target_node_id
+                        FROM nodes.parquet n
+                        INNER JOIN filtered_edges e ON n.node_id = e.target_node_id
                     `;
                     const neighbors = (await conn.query(fetchNeighborsQuery)).toArray();
 
@@ -167,14 +181,22 @@
 
                     for (const [neighborId_, node_data_] of neighbors) {
                         const neighborId = neighborId_[1];
+                        if (newCandidates.has(neighborId)) {
+                            continue;
+                        }
                         const data = node_data_[1].data[0].values;
-                        const dist = euclideanDistance(data, queryData);
-                        if (!newCandidates.has(neighborId)) {
-                            if (currentBest.length < ef || dist < currentBest[currentBest.length - 1][1]) {
-                                currentBest.push([neighborId, dist]);
-                                newCandidates.add(neighborId);
-                                improved = true;
-                            }
+                        let dist;
+                
+                        if (cache[neighborId] && cache[neighborId].data) {
+                            dist = cache[neighborId].distance;
+                        } else {
+                            dist = euclideanDistanceSquared(data, queryData);
+                            cache[neighborId] = { data, distance: dist };
+                        }
+                        if (currentBest.length < ef || dist < currentBest[currentBest.length - 1][1]) {
+                            currentBest.push([neighborId, dist]);
+                            newCandidates.add(neighborId);
+                            improved = true;
                         }
                     }
 
@@ -185,9 +207,13 @@
 
             const ids = currentBest.slice(0, k).map(([nodeId, _]) => nodeId);
             console.log(ids);
-            const raw = await conn.query(`SELECT text FROM read_parquet('${path}/docs.parquet') WHERE id in (${ids})`);
-            const out = raw.toArray().map(([item]) => item[1]);
-            await conn.close();
+
+            status.textContent = `Found best candidates. Retrieving documents...`;
+
+            const out = await Promise.all(ids.map(async (id) => {
+                const result = await conn.query(`SELECT text FROM read_parquet('${path}/docs.parquet') OFFSET ${id} LIMIT 1`);
+                return result.toArray().map(([item]) => item[1])[0];
+            }));
             return out;
         }
 
@@ -199,14 +225,34 @@
         }
 
         search.addEventListener('click', async (e) => {
-            const queryData = (await embed(textInput.textContent)).data;
+            const queryData = (await embed(textInput.value)).data;
             status.textContent = 'Searching...';
+
+            if (path.value !== cachedPath) {
+                cachedPath = path.value;
+                if (conn != null) {
+                    await conn.close();
+                }
+                status.textContent = 'Loading HNSW Index...';
+                conn = await db.connect();
+                const nodesRes = await fetch(`${cachedPath}/nodes.parquet`);
+                await db.registerFileBuffer('nodes.parquet', new Uint8Array(await nodesRes.arrayBuffer()));
+                const edgesRes = await fetch(`${cachedPath}/edges.parquet`);
+                await db.registerFileBuffer('edges.parquet', new Uint8Array(await edgesRes.arrayBuffer()));
+            }
+
+            if (conn == null) {
+                conn = await db.connect();
+            }
+
             const out = await searchWithSql(
+                conn,
                 queryData, // the type depends on your queryData structure
                 5,
-                path.value,
-                100
+                cachedPath,
+                20
             );
+            
             status.textContent = '';
             output.innerHTML = out.map((t) => `<p>${t}</p>`).join('')
         });
