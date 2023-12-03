@@ -138,4 +138,8 @@ textarea {
 }
 button {
   background: #00876e;
+  border: solid 1px;
+}
+button:disabled {
+  background: none;
 }
