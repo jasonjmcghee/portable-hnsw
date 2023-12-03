@@ -3,7 +3,30 @@ from sentence_transformers import SentenceTransformer
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+import numba as nb
 import os
+import heapq
+
+@nb.njit()
+def _distance(data_matrix, node_data):
+    """
+    Compute distances using Numba for JIT compilation and parallel execution.
+    """
+    return np.linalg.norm(data_matrix - node_data)
+
+@nb.njit(parallel=True)
+def _distances(data_matrix, node_data):
+    """
+    Compute distances using Numba for JIT compilation and parallel execution.
+    """
+    # Pre-allocate an array for distances
+    distances = np.empty(data_matrix.shape[0], dtype=np.float32)
+    
+    # Parallel loop to compute distances
+    for i in nb.prange(data_matrix.shape[0]):
+        distances[i] = _distance(data_matrix[i], node_data)
+
+    return distances
 
 def save_to_parquet(df, file_name):
     """
@@ -46,6 +69,8 @@ class HNSWIndex:
         # Set the maximum layer of the graph based on the maximum elements, using a logarithmic scale.
         self.max_layer = int(np.log2(max_elements)) if max_elements > 0 else 0
 
+        self.enter_point = None  # Entry point for the graph
+
     def add_items(self, data):
         """
         Adds multiple items (data points) to the HNSW index.
@@ -55,9 +80,9 @@ class HNSWIndex:
         
         This method iterates through the provided data points and inserts each into the index.
         """
-        for d in data:
+        for d in tqdm(data):
             if len(self.nodes) < self.max_elements:
-                self._insert_node(d)  # Inserts each data point into the index.
+                self._insert_node(np.array(d))  # Inserts each data point into the index.
 
     def _insert_node(self, data):
         """
@@ -79,42 +104,102 @@ class HNSWIndex:
         else:
             self.data_matrix = np.vstack([self.data_matrix, data])
 
-        # Assign layers to the new node, with a probabilistic approach based on the node's insertion order.
         node_layer = min(self.max_layer, int(-np.log(np.random.random()) / np.log(2)))
-        for layer in range(node_layer + 1):
-            node.neighbors[layer] = []  # Initializes an empty list for each layer of neighbors.
-            if node_id > 0:
-                neighbors = self._select_neighbors(node, layer)
-                node.neighbors[layer] = neighbors[:self.M]  # Assigns the top M neighbors for this layer.
-                # Update the neighbors' lists of existing nodes to include the new node.
-                for neighbor_id in neighbors:
-                    self.nodes[neighbor_id].neighbors.setdefault(layer, []).append(node_id)
-                    if len(self.nodes[neighbor_id].neighbors[layer]) > self.M:
-                        # Ensures that each node has at most M neighbors.
-                        self.nodes[neighbor_id].neighbors[layer] = self.nodes[neighbor_id].neighbors[layer][:self.M]
+        self._greedy_insert(node, node_layer)
 
-    def _select_neighbors(self, node, layer, k=None):
+    def _greedy_insert(self, node, node_layer):
+        if self.enter_point is None:
+            self.enter_point = node
+            for i in range(self.max_layer + 1):
+                node.neighbors[i] = []
+        else:
+            current_node = self.enter_point
+            for layer in range(self.max_layer, -1, -1):
+                current_node = self._search_layer(node, current_node, layer)
+                if layer <= node_layer:
+                    neighbors = self._select_neighbors(node, current_node, layer)
+                    node.neighbors[layer] = neighbors
+                    for neighbor_id in neighbors:
+                        self.nodes[neighbor_id].neighbors[layer].append(node.id)
+
+    def _search_layer(self, target_node, entry_node, layer):
+        """
+        Greedy search to find the closest node to the target node in a given layer.
+    
+        Args:
+            target_node (HNSWNode): The target node we are finding neighbors for.
+            entry_node (HNSWNode): The entry node from where the search starts.
+            layer (int): The layer of the graph at which the search is conducted.
+    
+        Returns:
+            HNSWNode: The closest node to the target node in this layer.
+        """
+        current_node = entry_node
+        while True:
+            closest_node = current_node
+            neighbor_ids = current_node.neighbors.get(layer, [])
+    
+            if neighbor_ids:
+                neighbor_nodes = [self.nodes[neighbor_id] for neighbor_id in neighbor_ids]
+                neighbor_data = np.array([node.data for node in neighbor_nodes])
+                target_data = np.array(target_node.data)
+    
+                # Vectorized distance computation
+                distances = _distances(neighbor_data, target_data)
+                min_dist_index = np.argmin(distances)
+    
+                if distances[min_dist_index] < _distance(self.nodes[closest_node.id].data, target_node.data):
+                    closest_node = neighbor_nodes[min_dist_index]
+    
+            if closest_node == current_node:
+                break
+            current_node = closest_node
+    
+        return current_node
+
+    def sort_candidates(self, candidates, M):
+        return sorted(candidates, key=lambda x: x[0])[:M]
+    
+    def _select_neighbors(self, target_node, current_node, layer, M=None):
         """
         Selects the nearest neighbors for a given node at a specified layer.
-
-        Args:
-            node (HNSWNode): The node for which neighbors are to be found.
-            layer (int): The layer of the graph at which neighbors are being searched.
-            k (int, optional): The number of nearest neighbors to find. Defaults to `ef_construction`.
-
-        Returns:
-            list: A list of IDs of the nearest neighbors.
-
-        This method calculates the Euclidean distance of all nodes to the given node,
-        and selects the closest neighbors, excluding the node itself.
         """
-        if k is None:
-            k = self.ef_construction  # Uses ef_construction as the default k value.
-        node_data = np.array(node.data)
-        distances = np.linalg.norm(self.data_matrix - node_data, axis=1)  # Compute distances from all nodes to the given node.
-        neighbor_ids = np.argpartition(distances, min(len(distances) - 1, k+1))[:k+1]  # Selects the closest k+1 neighbors (including the node itself).
-        return neighbor_ids[neighbor_ids != node.id].tolist()  # Excludes the node itself from its neighbors.
+        if M is None:
+            M = self.M
 
+        visited = set()  # To keep track of visited nodes
+        pq = []  # Priority queue (min-heap) for nearest neighbors
+        candidates = []  # List to collect candidate neighbors
+
+        # Initialize priority queue with the current node
+        initial_distance = _distance(target_node.data, current_node.data)
+        heapq.heappush(pq, (initial_distance, current_node.id))
+        visited.add(current_node.id)
+        candidates.append((initial_distance, current_node.id))
+
+        while pq:
+            _, node_id = heapq.heappop(pq)
+            if len(visited) > self.ef_construction:  # Limit the number of evaluations
+                break
+
+            neighbor_ids = self.nodes[node_id].neighbors.get(layer, [])
+            for neighbor_id in neighbor_ids:
+                if neighbor_id not in visited:
+                    visited.add(neighbor_id)
+                    neighbor_node = self.nodes[neighbor_id]
+                    neighbor_dist = _distance(target_node.data, neighbor_node.data)
+
+                    if len(pq) < M or neighbor_dist < pq[0][0]:
+                        candidates.append((neighbor_dist, neighbor_id))
+                        heapq.heappush(pq, (neighbor_dist, neighbor_id))
+                        if len(pq) > M:
+                            heapq.heappop(pq)  # Keep the queue size to M
+
+        # Sort the candidates by distance and select the top M
+        sorted_candidates = self.sort_candidates(candidates, M)
+        return [node_id for _, node_id in sorted_candidates]
+
+        
     def knn_query(self, query_data, k, ef=10):
         """
         Performs a k-NN (k-nearest neighbors) query on the HNSW index.
@@ -180,7 +265,11 @@ def serialize_hnsw_to_tables_v2(hnsw_index):
     nodes_df = pd.DataFrame(nodes_data, columns=['node_id', 'data'])
     edges_df = pd.DataFrame(edges_data, columns=['source_node_id', 'target_node_id', 'layer'])
     
+     # Ensure correct data types
     nodes_df['node_id'] = nodes_df['node_id'].astype('int32')
+    
+    # For 'data' column, ensure the data type is appropriate.
+    # If it's a vector or complex type, you might need to handle it differently.
     edges_df['source_node_id'] = edges_df['source_node_id'].astype('int32')
     edges_df['target_node_id'] = edges_df['target_node_id'].astype('int32')
     edges_df['layer'] = edges_df['layer'].astype('int32')
@@ -205,21 +294,22 @@ def search_similar_documents(query, index, docs, top_k=1):
     labels, distances = index.knn_query(query_embedding, k=top_k)
     return [docs[i] for i in labels]
 
-def from_list(list, folder, max_chunk_chars=4000):
+def from_list(list, folder, max_chunk_chars=4000, precomputed_embeddings=precomputed_embeddings):
     if not os.path.isdir(folder):
         os.mkdir(folder)
 
-    embeddings = embed_documents(list)
+    embeddings = embed_documents(list) if precomputed_embeddings is None else precomputed_embeddings
     index = create_hnsw_index(embeddings)
-
+    # Serialize the HNSW index to a table
     (nodes, edges) = serialize_hnsw_to_tables_v2(index)
     save_to_parquet(nodes, f"{folder}/nodes.parquet")
     save_to_parquet(edges, f"{folder}/edges.parquet")
 
-    all_docs = pd.DataFrame([{ "id": i, "text": doc } for i, doc in enumerate(chunks) ])
+    all_docs = pd.DataFrame([{ "id": i, "text": doc } for i, doc in enumerate(list) ])
     save_to_parquet(all_docs, f"{folder}/docs.parquet")
+    return nodes, edges
 
-def from_document(path, folder, max_chunk_chars=4000):
+def from_document(path, folder, max_chunk_chars=4000, precomputed_embeddings=None):
     if not os.path.isdir(folder):
         os.mkdir(folder)
     chunks = [""]
@@ -230,4 +320,4 @@ def from_document(path, folder, max_chunk_chars=4000):
                 chunks.append("")
             chunks[-1] += line
 
-    return from_list(chunks, folder, max_chunk_chars=max_chunk_chars)
+    return from_list(chunks, folder, max_chunk_chars=max_chunk_chars, precomputed_embeddings=precomputed_embeddings)
