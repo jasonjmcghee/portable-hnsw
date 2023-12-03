@@ -233,11 +233,13 @@
         }
 
         async function loadIndex() {
+            status.textContent = 'Loading HNSW Index...';
             conn = await db.connect();
             const nodesRes = await fetch(`${cachedPath}/nodes.parquet`);
             await db.registerFileBuffer('nodes.parquet', new Uint8Array(await nodesRes.arrayBuffer()));
             const edgesRes = await fetch(`${cachedPath}/edges.parquet`);
             await db.registerFileBuffer('edges.parquet', new Uint8Array(await edgesRes.arrayBuffer()));
+            status.textContent = 'HNSW Index Loaded.';
         }
 
         async function performSearch() {
@@ -249,7 +251,6 @@
                 if (conn != null) {
                     await conn.close();
                 }
-                status.textContent = 'Loading HNSW Index...';
                 await loadIndex();
             }
 
