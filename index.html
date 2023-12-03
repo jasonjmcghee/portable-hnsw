@@ -246,10 +246,15 @@
             }
 
             const out = await searchWithSql(
+                // DuckDB
                 conn,
-                queryData, // the type depends on your queryData structure
+                // Embedding
+                queryData,
+                // K
                 5,
+                // Path to parquet indices
                 cachedPath,
+                // EF (the max number of candidate neighbors during search)
                 20
             );
             
