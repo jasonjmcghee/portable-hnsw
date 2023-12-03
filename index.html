@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/normalize/8.0.1/normalize.css">
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="style.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Portable HNSW</title>
+    <style>
+        .container {
+            padding: 16px;
+            display: flex;
+            justify-content: center;
+        }
+        .inner {
+            display: flex;
+            justify-content: center;
+            flex-direction: column;
+            max-width: 1000px;
+            gap: 20px;
+        }
+        .query {
+            display: flex;
+            justify-content: center;
+            gap: 12px;
+        }
+    </style>
+</head>
+
+<body>
+    <main class="container">
+        <div class="inner">
+            <div>
+                Path: <input type="text" id="path" value="http://localhost:8000/notw"></input>
+            </div>
+            <div>
+                <div class="query">
+                    <textarea id="text-input">falling in love</textarea>
+                    <button id="search">Search</button>
+                </div>
+            <p id="status"></p>
+            </div>
+            <div id="output"></div>
+        </div>
+    </main>
+    <script type="module">
+        import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.6.0';
+
+        // Since we will download the model from the Hugging Face Hub, we can skip the local model check
+        env.allowLocalModels = false;
+
+        // Reference the elements that we will need
+        const status = document.getElementById('status');
+        const textInput = document.getElementById('text-input');
+        const search = document.getElementById('search');
+        const output = document.getElementById('output');
+        const path = document.getElementById('path');
+
+        // Create a new object detection pipeline
+        status.textContent = 'Loading model...';
+        const extractor = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
+        status.textContent = 'Ready';
+
+        import * as duckdb from 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/+esm';
+
+        const JSDELIVR_BUNDLES = duckdb.getJsDelivrBundles();
+
+        // Select a bundle based on browser checks
+        const bundle = await duckdb.selectBundle(JSDELIVR_BUNDLES);
+
+        const worker_url = URL.createObjectURL(
+            new Blob([`importScripts("${bundle.mainWorker}");`], {type: 'text/javascript'})
+        );
+
+        // Instantiate the asynchronus version of DuckDB-wasm
+        const worker = new Worker(worker_url);
+        const logger = new duckdb.ConsoleLogger();
+        const db = new duckdb.AsyncDuckDB(logger, worker);
+        window.db = db;
+        await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+        URL.revokeObjectURL(worker_url);
+
+        function euclideanDistance(arr1, arr2) {
+            if (arr1.length !== arr2.length) {
+                throw new Error("Arrays must be of the same length");
+            }
+            let sum = 0;
+            for (let i = 0; i < arr1.length; i++) {
+                sum += (arr1[i] - arr2[i]) ** 2;
+            }
+            return Math.sqrt(sum);
+        }
+
+        async function searchWithSql(
+            queryData,
+            k,
+            path,
+            ef = 10
+        ) {
+            const origData = queryData;
+            const conn = await db.connect();
+
+            const countQuery = `SELECT COUNT(node_id) FROM read_parquet('${path}/nodes.parquet')`;
+            const countResult = await conn.query(countQuery);
+            const count = countResult.toArray().map(([count, _]) => count[1])[0].value;
+
+            const maxLayer = count > 0 ? Math.floor(Math.log2(count)) : 0;
+
+            const initNodeQuery = `
+                SELECT n.node_id, n.data as node_data
+                FROM read_parquet('${path}/nodes.parquet') n
+                ORDER BY RANDOM() LIMIT 1
+            `;
+            let currentBest = await conn.query(initNodeQuery);
+            currentBest = currentBest.toArray().map(([nId, data]) => ([nId[1], euclideanDistance(data[1].data[0].values, queryData)]))
+
+            for (let layer = maxLayer; layer >= 0; layer--) {
+                let improved = true;
+                while (improved) {                    
+                    improved = false;
+                    const currentNodeIds = currentBest;
+                    const candidates = new Set(currentNodeIds);
+                    const newCandidates = new Set();
+
+                    const sqlSafeCandidates = Array.from(candidates).join(',');
+
+                    // Create temp_candidates table
+                    const createTempCandidatesQuery = `
+                        DROP TABLE IF EXISTS temp_candidates;
+                        CREATE TEMP TABLE temp_candidates AS
+                        SELECT UNNEST(ARRAY[${sqlSafeCandidates}]) AS node_id;
+                    `;
+                    await conn.query(createTempCandidatesQuery);
+
+                    // Create filtered_edges table
+                    const createFilteredEdgesQuery = `
+                        DROP TABLE IF EXISTS filtered_edges;
+                        CREATE TEMP TABLE filtered_edges AS
+                        SELECT * FROM read_parquet('${path}/edges.parquet')
+                        WHERE source_node_id IN (SELECT node_id FROM temp_candidates)
+                        AND layer = ${layer}
+                        AND target_node_id NOT IN (SELECT node_id FROM temp_candidates);
+                    `;
+                    await conn.query(createFilteredEdgesQuery);
+
+                    // Perform the join and fetch neighbors
+                    const fetchNeighborsQuery = `
+                        SELECT 
+                            e.target_node_id as node_id, 
+                            n.data as node_data
+                        FROM 
+                            read_parquet('${path}/nodes.parquet') n
+                        INNER JOIN 
+                            filtered_edges e ON n.node_id = e.target_node_id
+                    `;
+                    const neighbors = (await conn.query(fetchNeighborsQuery)).toArray();
+
+
+                    if (neighbors.length === 0) {
+                        continue;
+                    }
+
+                    for (const [neighborId_, node_data_] of neighbors) {
+                        const neighborId = neighborId_[1];
+                        const data = node_data_[1].data[0].values;
+                        const dist = euclideanDistance(data, queryData);
+                        if (!newCandidates.has(neighborId)) {
+                            if (currentBest.length < ef || dist < currentBest[currentBest.length - 1][1]) {
+                                currentBest.push([neighborId, dist]);
+                                newCandidates.add(neighborId);
+                                improved = true;
+                            }
+                        }
+                    }
+
+                    currentBest.sort((a, b) => a[1] - b[1]);
+                    currentBest = currentBest.slice(0, ef);
+                }
+            }
+
+            const ids = currentBest.slice(0, k).map(([nodeId, _]) => nodeId);
+            console.log(ids);
+            const raw = await conn.query(`SELECT text FROM read_parquet('${path}/docs.parquet') WHERE id in (${ids})`);
+            const out = raw.toArray().map(([item]) => item[1]);
+            await conn.close();
+            return out;
+        }
+
+        async function embed(text) {
+            status.textContent = 'Analysing...';
+            const out = await extractor(text, { pooling: 'mean', normalize: true });
+            status.textContent = '';
+            return out;
+        }
+
+        search.addEventListener('click', async (e) => {
+            const queryData = (await embed(textInput.textContent)).data;
+            status.textContent = 'Searching...';
+            const out = await searchWithSql(
+                queryData, // the type depends on your queryData structure
+                5,
+                path.value,
+                100
+            );
+            status.textContent = '';
+            output.innerHTML = out.map((t) => `<p>${t}</p>`).join('')
+        });
+    </script>
+</body>
+
+</html>
