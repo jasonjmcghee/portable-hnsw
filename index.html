@@ -70,7 +70,7 @@
         let cachedPath = "";
         let conn = null;
 
-        // Create a new object detection pipeline
+        // Create a new feature extraction pipeline
         status.textContent = 'Loading embedding model...';
         const extractor = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
         status.textContent = '';
