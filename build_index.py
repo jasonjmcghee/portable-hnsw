@@ -6,6 +6,7 @@ import pyarrow.parquet as pq
 import numba as nb
 import os
 import heapq
+from tqdm import tqdm
 
 @nb.njit()
 def _distance(data_matrix, node_data):
@@ -14,8 +15,16 @@ def _distance(data_matrix, node_data):
     """
     return np.linalg.norm(data_matrix - node_data)
 
-@nb.njit(parallel=True)
-def _distances(data_matrix, node_data):
+@nb.njit(parallel=False, cache=True)
+def _square_distance(data_matrix, node_data):
+    """
+    Compute distances using Numba for JIT compilation and parallel execution.
+    """
+    diff = data_matrix - node_data
+    return np.dot(diff, diff)
+
+@nb.njit(parallel=False, cache=True)
+def _square_distances(data_matrix, node_data):
     """
     Compute distances using Numba for JIT compilation and parallel execution.
     """
@@ -24,7 +33,8 @@ def _distances(data_matrix, node_data):
     
     # Parallel loop to compute distances
     for i in nb.prange(data_matrix.shape[0]):
-        distances[i] = _distance(data_matrix[i], node_data)
+        diff = data_matrix[i] - node_data
+        distances[i] =  np.dot(diff, diff)
 
     return distances
 
@@ -65,24 +75,34 @@ class HNSWIndex:
         self.ef_construction = ef_construction  # Size of the dynamic candidate list during the construction phase.
         self.max_elements = max_elements  # Maximum capacity of the index.
         self.nodes = []  # Initializes an empty list to store the nodes.
-        self.data_matrix = None  # Data matrix to store the vectors.
+        self.data_matrix = np.zeros((max_elements, dim))  # Pre-allocated if max_elements is a good estimate
+        self.data_list = []  # Temporary storage for new data points
+        self.current_size = 0  # Tracks the number of data points added
+
         # Set the maximum layer of the graph based on the maximum elements, using a logarithmic scale.
         self.max_layer = int(np.log2(max_elements)) if max_elements > 0 else 0
 
         self.enter_point = None  # Entry point for the graph
-
+    
     def add_items(self, data):
         """
         Adds multiple items (data points) to the HNSW index.
-
+    
         Args:
             data (iterable): An iterable of data points to be added to the index.
         
         This method iterates through the provided data points and inserts each into the index.
         """
         for d in tqdm(data):
-            if len(self.nodes) < self.max_elements:
-                self._insert_node(np.array(d))  # Inserts each data point into the index.
+            if self.current_size < self.max_elements:
+                self._insert_node(np.array(d))
+
+        # Update data_matrix in batch after all insertions
+        if self.data_list:
+            new_data = np.array(self.data_list)
+            self.data_matrix[self.current_size:self.current_size + len(new_data)] = new_data
+            self.data_list = []  # Clear the temporary list
+            self.current_size += len(new_data)
 
     def _insert_node(self, data):
         """
@@ -94,15 +114,12 @@ class HNSWIndex:
         This private method handles the insertion of a single data point into the graph,
         updating the data matrix and assigning neighbors to the new node.
         """
-        node_id = len(self.nodes)  # Assigns a unique ID to the new node, based on its position in the list.
-        node = HNSWNode(data, node_id)  # Creates a new node instance.
-        self.nodes.append(node)  # Adds the new node to the list of nodes.
+        node_id = len(self.nodes)
+        node = HNSWNode(data, node_id)
+        self.nodes.append(node)
 
-        # Update the data matrix with the new data point.
-        if self.data_matrix is None:
-            self.data_matrix = np.array([data])
-        else:
-            self.data_matrix = np.vstack([self.data_matrix, data])
+        # Add data to list instead of updating data_matrix directly
+        self.data_list.append(data)
 
         node_layer = min(self.max_layer, int(-np.log(np.random.random()) / np.log(2)))
         self._greedy_insert(node, node_layer)
@@ -135,6 +152,9 @@ class HNSWIndex:
             HNSWNode: The closest node to the target node in this layer.
         """
         current_node = entry_node
+        # set the cached distance for the first time
+        cached_dist = _square_distance(self.nodes[current_node.id].data, target_node.data)
+
         while True:
             closest_node = current_node
             neighbor_ids = current_node.neighbors.get(layer, [])
@@ -142,14 +162,16 @@ class HNSWIndex:
             if neighbor_ids:
                 neighbor_nodes = [self.nodes[neighbor_id] for neighbor_id in neighbor_ids]
                 neighbor_data = np.array([node.data for node in neighbor_nodes])
-                target_data = np.array(target_node.data)
     
-                # Vectorized distance computation
-                distances = _distances(neighbor_data, target_data)
+                # Vectorized square distance computation
+                # as we don't need to perform full distance calculations
+                distances = _square_distances(neighbor_data, target_node.data)
                 min_dist_index = np.argmin(distances)
     
-                if distances[min_dist_index] < _distance(self.nodes[closest_node.id].data, target_node.data):
+                if distances[min_dist_index] < cached_dist:
                     closest_node = neighbor_nodes[min_dist_index]
+                    # closest was updated, update the distance
+                    cached_dist = _square_distance(self.nodes[closest_node.id].data, target_node.data)
     
             if closest_node == current_node:
                 break
@@ -172,7 +194,7 @@ class HNSWIndex:
         candidates = []  # List to collect candidate neighbors
 
         # Initialize priority queue with the current node
-        initial_distance = _distance(target_node.data, current_node.data)
+        initial_distance = _square_distance(target_node.data, current_node.data)
         heapq.heappush(pq, (initial_distance, current_node.id))
         visited.add(current_node.id)
         candidates.append((initial_distance, current_node.id))
@@ -186,8 +208,7 @@ class HNSWIndex:
             for neighbor_id in neighbor_ids:
                 if neighbor_id not in visited:
                     visited.add(neighbor_id)
-                    neighbor_node = self.nodes[neighbor_id]
-                    neighbor_dist = _distance(target_node.data, neighbor_node.data)
+                    neighbor_dist = _square_distance(target_node.data, self.nodes[neighbor_id].data)
 
                     if len(pq) < M or neighbor_dist < pq[0][0]:
                         candidates.append((neighbor_dist, neighbor_id))
@@ -267,16 +288,15 @@ def serialize_hnsw_to_tables_v2(hnsw_index):
     
      # Ensure correct data types
     nodes_df['node_id'] = nodes_df['node_id'].astype('int32')
-    
-    # For 'data' column, ensure the data type is appropriate.
-    # If it's a vector or complex type, you might need to handle it differently.
+
     edges_df['source_node_id'] = edges_df['source_node_id'].astype('int32')
     edges_df['target_node_id'] = edges_df['target_node_id'].astype('int32')
     edges_df['layer'] = edges_df['layer'].astype('int32')
+    
     edges_df.sort_values(by=['source_node_id', 'layer'], inplace=True)
+    edges_df.set_index(['source_node_id', 'target_node_id', 'layer'])
 
     nodes_df.set_index('node_id')
-    edges_df.set_index(['source_node_id', 'target_node_id', 'layer'])
     
     return nodes_df, edges_df
 
@@ -284,7 +304,7 @@ def embed_documents(docs, model_name="all-MiniLM-L6-v2"):
     model = SentenceTransformer(model_name)
     return model.encode(docs, show_progress_bar=True)
 
-def create_hnsw_index(embeddings, dim=384, ef=200, M=14):
+def create_hnsw_index(embeddings, dim=384, ef=100, M=14):
     p = HNSWIndex(dim=dim, max_elements=len(embeddings), ef_construction=ef, M=M)
     p.add_items(embeddings)
     return p
