@@ -139,7 +139,9 @@ textarea {
 button {
   background: #00876e;
   border: solid 1px;
+  cursor: pointer;
 }
 button:disabled {
+  cursor: not-allowed;
   background: none;
 }
