@@ -250,7 +250,7 @@
                     await conn.close();
                 }
                 status.textContent = 'Loading HNSW Index...';
-                loadIndex();
+                await loadIndex();
             }
 
             if (conn == null) {
