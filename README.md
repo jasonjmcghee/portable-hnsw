@@ -38,8 +38,7 @@ which worked! But since the index is only like 100MB, and each range request add
 it all into memory was about twice as fast. But, it means you could have a 1TB index and it would
 (theoretically) still work, which is pretty crazy.
 
-You can try this yourself by swapping out the `nodes.parquet` bits in the SQL for `read_parquet('${path}/nodes.parquet')`.
-DuckDB takes care of the rest.
+You can try this yourself by swapping out the `nodes.parquet` bits in the SQL for `read_parquet('${path}/nodes.parquet')`. And the same with edges. DuckDB takes care of the rest.
 
 ---
 
