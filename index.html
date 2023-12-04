@@ -39,6 +39,9 @@
             align-items: center;
             gap: 12px;
         }
+        #instant-mode {
+          cursor: pointer;
+        }
         #path {
             flex-grow: 1;
         }
@@ -53,8 +56,14 @@
             <a href="https://github.com/jasonjmcghee/portable-hnsw">What is going on here? / Show me the code</a>
             <i>Too slow for you? I'm probably doing things poorly. PRs welcome!</i>
             <div class="path-input">
-                Path: <input type="text" id="path" value="https://jasonjmcghee.github.io/portable-hnsw/blogs"></input>
+              <a href="" id="frankenstein">Frankenstein (fastest)</a>
+              <a href="" id="shakespeare">Shakespeare</a>
+              <a href="" id="blogs">50k Blogs Dataset (slowest)</a>
             </div>
+            <div class="path-input">
+                Path: <input type="text" id="path" placeholder="https://jasonjmcghee.github.io/portable-hnsw/frankenstein" value="frankenstein"></input>
+            </div>
+            <div class="path-input">Debounced auto-search<input id="instant-mode" type="checkbox"></input></div>
             <div>
                 <div class="query">
                     <textarea id="text-input">falling in love</textarea>
@@ -74,7 +83,12 @@
         // Reference the elements that we will need
         const status = document.getElementById('status');
         const textInput = document.getElementById('text-input');
+        const blogs = document.getElementById('blogs');
+        const shakespeare = document.getElementById('shakespeare');
+        const frankenstein = document.getElementById('frankenstein');
         const search = document.getElementById('search');
+        const instantMode = document.getElementById('instant-mode');
+        instantMode.checked = true;
         const output = document.getElementById('output');
         const path = document.getElementById('path');
         let cachedPath = "https://jasonjmcghee.github.io/portable-hnsw/blogs";
@@ -83,7 +97,7 @@
         // Create a new feature extraction pipeline
         status.textContent = 'Loading embedding model...';
         const extractor = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
-        status.textContent = '';
+        status.textContent = 'Ready for user!';
 
         import * as duckdb from 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/+esm';
 
@@ -122,6 +136,8 @@
             path,
             ef = 10
         ) {
+            path = path.startsWith("http") ? path : `${window.location.href}/${path}`;
+
             status.textContent = 'Searching HNSW Index...';
 
             await db.registerFileURL('docs.parquet', `${path}/docs.parquet`, duckdb.DuckDBDataProtocol.HTTP, false);
@@ -229,7 +245,7 @@
         async function embed(text) {
             status.textContent = 'Analysing...';
             const out = await extractor(text, { pooling: 'mean', normalize: true });
-            status.textContent = '';
+            status.textContent = 'Ready for user!';
             return out;
         }
 
@@ -241,6 +257,7 @@
             const edgesRes = await fetch(`${cachedPath}/edges.parquet`);
             await db.registerFileBuffer('edges.parquet', new Uint8Array(await edgesRes.arrayBuffer()));
             status.textContent = 'HNSW Index Loaded.';
+            status.textContent = 'Ready for user!';
         }
 
         async function performSearch() {
@@ -272,9 +289,28 @@
                 20
             );
             
-            status.textContent = '';
+            status.textContent = 'Ready for user!';
             output.innerHTML = out.map((t) => `<p>${t}</p>`).join('')
         }
+
+        const debounce = (callback, wait) => {
+          let timeoutId = null;
+          return () => {
+            window.clearTimeout(timeoutId);
+            timeoutId = window.setTimeout(async () => {
+              await callback();
+            }, wait);
+          };
+        }
+
+        const debouncedInstantSearch = debounce(async () => await performSearch(), 300);
+
+        textInput.addEventListener('input', async (e) => {
+          console.log(e, instantMode.checked, search.disabled);
+          if (instantMode.checked && !search.disabled) {
+            debouncedInstantSearch();
+          }
+        });
 
         search.addEventListener('click', async (e) => {
             search.disabled = true;
@@ -282,7 +318,34 @@
             search.disabled = false;
         });
 
-        await loadIndex();
+        blogs.addEventListener('click', async (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          path.value = "blogs"
+          instantMode.checked = false;
+          textInput.value = "falling in love";
+          await loadIndex();
+          status.textContent = 'This dataset is bigger - hit search when you\'re ready.'
+        });
+
+        frankenstein.addEventListener('click', async (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          instantMode.checked = true;
+          path.value = "frankenstein"
+          textInput.value = "in the ocean";
+          await performSearch();
+        });
+
+        shakespeare.addEventListener('click', async (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          path.value = "shakespeare"
+          textInput.value = "got some blood on their hands"
+          await performSearch();
+        });
+
+        await performSearch();
         search.disabled = false;
     </script>
 </body>

@@ -7,6 +7,7 @@ import numba as nb
 import os
 import heapq
 from tqdm import tqdm
+import argparse
 
 @nb.njit()
 def _distance(data_matrix, node_data):
@@ -265,7 +266,7 @@ def search_similar_documents(query, index, docs, top_k=1):
     labels, distances = index.knn_query(query_embedding, k=top_k)
     return [docs[i] for i in labels]
 
-def from_list(list, folder, max_chunk_chars=4000, precomputed_embeddings=precomputed_embeddings):
+def from_list(list, folder, max_chunk_chars=4000, precomputed_embeddings=None):
     if not os.path.isdir(folder):
         os.mkdir(folder)
 
@@ -283,6 +284,7 @@ def from_list(list, folder, max_chunk_chars=4000, precomputed_embeddings=precomp
 def from_document(path, folder, max_chunk_chars=4000, precomputed_embeddings=None):
     if not os.path.isdir(folder):
         os.mkdir(folder)
+
     chunks = [""]
     
     with open(path) as f:
@@ -292,3 +294,11 @@ def from_document(path, folder, max_chunk_chars=4000, precomputed_embeddings=Non
             chunks[-1] += line
 
     return from_list(chunks, folder, max_chunk_chars=max_chunk_chars, precomputed_embeddings=precomputed_embeddings)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Process a single text document and create an HNSW index.")
+    parser.add_argument("path", help="Path to a document")
+    parser.add_argument("--folder", default="output", help="Output folder for Parquet files")
+
+    args = parser.parse_args()
+    from_document(args.path, args.folder)

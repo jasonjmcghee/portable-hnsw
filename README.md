@@ -1,5 +1,19 @@
 # Portable HNSW
 
+---------------
+To build your own index:
+
+```bash
+poetry install
+poetry run python build_index.py <path to text file> [output folder]
+```
+
+Or you can jump into the code and do more complex use cases.
+
+Note: `rangehttpserver` works well as a simple server to support range requests for locally testing duckdb parquet + large indices.
+
+---------------
+
 So what's going on here?
 
 Yeah - fair question.
