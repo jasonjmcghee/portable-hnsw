@@ -6,8 +6,7 @@ Yeah - fair question.
 
 So I had this idea. 
 
-What if an HNSW index ([hierarchical navigable small world graphs](https://arxiv.org/abs/1603.09320))
-was just a file, and you could serve it from a CDN, and search it directly in the browser?
+What if an HNSW index ([hierarchical navigable small world graphs](https://arxiv.org/abs/1603.09320) - _a good way to enable searching for stuff by their underlying meaning_) was just a file, and you could serve it from a CDN, and search it directly in the browser?
 
 And what if you didn't need to load the entire thing in memory, so you could search a massive index
 without being RAM rich?
