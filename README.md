@@ -1,6 +1,5 @@
-# Portable HNSW
+<h1><img src="https://github.com/jasonjmcghee/portable-hnsw/assets/1522149/8fab793b-e0a2-4fc9-b813-952c95822705" height="24"> Portable HNSW </h1>
 
----------------
 To build your own index:
 
 ```bash
