@@ -9,6 +9,8 @@ poetry run python build_index.py <path to text file> [output folder]
 
 Or you can jump into the code and do more complex use cases.
 
+Then throw it in a GitHub repo and enable GitHub Pages. You can add / edit the index.html or test it by pasting the link to the folder in the "path" input [here](https://jasonjmcghee.github.io/portable-hnsw/)
+
 Note: `rangehttpserver` works well as a simple server to support range requests for locally testing duckdb parquet + large indices.
 
 ---------------
