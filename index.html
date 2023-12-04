@@ -91,7 +91,7 @@
         instantMode.checked = true;
         const output = document.getElementById('output');
         const path = document.getElementById('path');
-        let cachedPath = "https://jasonjmcghee.github.io/portable-hnsw/blogs";
+        let cachedPath = "";
         let conn = null;
 
         // Create a new feature extraction pipeline
@@ -250,6 +250,10 @@
         }
 
         async function loadIndex() {
+            debugger;
+            if (path.value !== cachedPath) {
+              cachedPath = path.value;
+            }
             status.textContent = 'Loading HNSW Index...';
             conn = await db.connect();
             const nodesRes = await fetch(`${cachedPath}/nodes.parquet`);
@@ -306,7 +310,6 @@
         const debouncedInstantSearch = debounce(async () => await performSearch(), 300);
 
         textInput.addEventListener('input', async (e) => {
-          console.log(e, instantMode.checked, search.disabled);
           if (instantMode.checked && !search.disabled) {
             debouncedInstantSearch();
           }
@@ -335,6 +338,7 @@
           path.value = "frankenstein"
           textInput.value = "in the ocean";
           await performSearch();
+          search.disabled = false;
         });
 
         shakespeare.addEventListener('click', async (e) => {
