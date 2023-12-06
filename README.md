@@ -1,5 +1,7 @@
 <h1><img src="https://github.com/jasonjmcghee/portable-hnsw/assets/1522149/8fab793b-e0a2-4fc9-b813-952c95822705" height="24"> Portable HNSW </h1>
 
+<a href="https://www.loom.com/share/a5cb417115684a3e82a5fd3f20266489"><img style="max-width:300px;" src="https://cdn.loom.com/sessions/thumbnails/a5cb417115684a3e82a5fd3f20266489-with-play.gif"></a>
+
 To build your own index:
 
 ```bash
