@@ -15,8 +15,7 @@ def _distance(data_matrix, node_data):
 
 @nb.njit(parallel=False, cache=True)
 def _square_distance(data_matrix, node_data):
-    diff = data_matrix - node_data
-    return np.dot(diff, diff)
+    return np.sum((data_matrix - node_data)**2)
 
 @nb.njit(parallel=False, cache=True)
 def _square_distances(data_matrix, node_data):
@@ -25,8 +24,7 @@ def _square_distances(data_matrix, node_data):
     
     # Parallel loop to compute distances
     for i in nb.prange(data_matrix.shape[0]):
-        diff = data_matrix[i] - node_data
-        distances[i] =  np.dot(diff, diff)
+        distances[i] = np.sum((data_matrix[i] - node_data)**2)
 
     return distances
 
