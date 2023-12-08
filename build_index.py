@@ -95,8 +95,9 @@ class HNSWIndex:
         else:
             current_node = self.enter_point
             for layer in range(self.max_layer, -1, -1):
-                current_node = self._search_layer(node, current_node, layer)
-                if layer <= node_layer:
+                if layer > node_layer:
+                    current_node = self._search_layer(node, current_node, layer)
+                elif layer <= node_layer:
                     neighbors = self._select_neighbors(node, current_node, layer)
                     node.neighbors[layer] = neighbors
                     for neighbor_id in neighbors:
@@ -133,9 +134,6 @@ class HNSWIndex:
             current_node = closest_node
     
         return current_node
-
-    def sort_candidates(self, candidates, M):
-        return sorted(candidates, key=lambda x: x[0])[:M]
     
     def _select_neighbors(self, target_node, current_node, layer, M=None):
         """
@@ -172,7 +170,7 @@ class HNSWIndex:
                             heapq.heappop(pq)  # Keep the queue size to M
 
         # Sort the candidates by distance and select the top M
-        sorted_candidates = self.sort_candidates(candidates, M)
+        sorted_candidates = heapq.nsmallest(M, candidates)
         return [node_id for _, node_id in sorted_candidates]
 
         
