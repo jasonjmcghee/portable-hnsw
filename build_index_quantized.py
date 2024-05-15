@@ -31,6 +31,23 @@ def _square_distances(data_matrix, node_data):
 def save_to_parquet(df, file_name):
     table = pa.Table.from_pandas(df)
     pq.write_table(table, file_name)
+    
+def quantize_vector(vector, bits_per_dimension=8):
+    min_val = np.min(vector)
+    max_val = np.max(vector)
+    range_val = max_val - min_val
+    scale = (2 ** bits_per_dimension) - 1
+    
+    # Normalize the vector
+    # 0-1 normalization unsigned
+    # normalized_vector = (vector - min_val) / range_val
+    
+    # -1->1 normalization signed
+    normalized_vector = 2 * ((vector - min_val) / range_val) - 1
+    
+    quantized_vector = np.floor(normalized_vector * scale)
+    
+    return quantized_vector
 
 class HNSWNode:
     def __init__(self, data, id):
@@ -44,7 +61,7 @@ class HNSWIndex:
 
     Kind of.
     """
-    def __init__(self, dim, M=16, ef_construction=200, max_elements=10000):
+    def __init__(self, dim, M=16, ef_construction=200, max_elements=10000, bits_per_dimension=8):
         self.dim = dim  # Dimensionality of the data points.
         self.M = M  # Maximum number of connections per node in the graph.
         self.ef_construction = ef_construction  # Size of the dynamic candidate list during the construction phase.
@@ -53,6 +70,7 @@ class HNSWIndex:
         self.data_matrix = np.zeros((max_elements, dim))  # Pre-allocated if max_elements is a good estimate
         self.data_list = []  # Temporary storage for new data points
         self.current_size = 0  # Tracks the number of data points added
+        self.bits_per_dimension = bits_per_dimension
 
         # Set the maximum layer of the graph based on the maximum elements, using a logarithmic scale.
         self.max_layer = int(np.log2(max_elements)) if max_elements > 0 else 0
@@ -80,7 +98,8 @@ class HNSWIndex:
         update the data matrix and assign neighbors to the new node.
         """
         node_id = len(self.nodes)
-        node = HNSWNode(data, node_id)
+        quantized_data = quantize_vector(data, self.bits_per_dimension)
+        node = HNSWNode(quantized_data, node_id)
         self.nodes.append(node)
         self.data_list.append(data)
 
@@ -234,12 +253,14 @@ def serialize_hnsw_to_tables_v2(hnsw_index):
     nodes_df = pd.DataFrame(nodes_data, columns=['node_id', 'data'])
     edges_df = pd.DataFrame(edges_data, columns=['source_node_id', 'target_node_id', 'layer'])
     
-     # Ensure correct data types
-    nodes_df['node_id'] = nodes_df['node_id'].astype('int32')
-
-    edges_df['source_node_id'] = edges_df['source_node_id'].astype('int32')
-    edges_df['target_node_id'] = edges_df['target_node_id'].astype('int32')
-    edges_df['layer'] = edges_df['layer'].astype('int32')
+    # Ensure correct data types
+    # nodes_df['node_id'] = nodes_df['node_id'].astype('int32')
+    
+    # 8 bit quantized
+    nodes_df['node_id'] = nodes_df['node_id'].astype('int8')
+    edges_df['source_node_id'] = edges_df['source_node_id'].astype('int8')
+    edges_df['target_node_id'] = edges_df['target_node_id'].astype('int8')
+    edges_df['layer'] = edges_df['layer'].astype('int8')
     
     edges_df.sort_values(by=['source_node_id', 'layer'], inplace=True)
     edges_df.set_index(['source_node_id', 'target_node_id', 'layer'])
@@ -270,11 +291,11 @@ def from_list(list, folder, max_chunk_chars=4000, precomputed_embeddings=None):
     index = create_hnsw_index(embeddings)
     # Serialize the HNSW index to a table
     (nodes, edges) = serialize_hnsw_to_tables_v2(index)
-    save_to_parquet(nodes, f"{folder}/nodes.parquet")
-    save_to_parquet(edges, f"{folder}/edges.parquet")
+    save_to_parquet(nodes, f"{folder}/nodes_quantized.parquet")
+    save_to_parquet(edges, f"{folder}/edges_quantized.parquet")
 
     all_docs = pd.DataFrame([{ "id": i, "text": doc } for i, doc in enumerate(list) ])
-    save_to_parquet(all_docs, f"{folder}/docs.parquet")
+    save_to_parquet(all_docs, f"{folder}/docs_quantized.parquet")
     return nodes, edges
 
 def from_document(path, folder, max_chunk_chars=4000, precomputed_embeddings=None):

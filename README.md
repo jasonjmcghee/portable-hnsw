@@ -6,7 +6,14 @@ To build your own index:
 
 ```bash
 poetry install
+
+# To run original version
 poetry run python build_index.py <path to text file> [output folder]
+
+# To run quantized version
+poetry run python build_index_quantized.py <path to text file> [output folder]
+# To use the quantized version, configure the web server to serve `index_quantized.html` instead of `index.html`.
+
 ```
 
 Or you can jump into the code and do more complex use cases.
