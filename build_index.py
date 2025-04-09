@@ -47,6 +47,7 @@ class HNSWIndex:
     def __init__(self, dim, M=16, ef_construction=200, max_elements=10000):
         self.dim = dim  # Dimensionality of the data points.
         self.M = M  # Maximum number of connections per node in the graph.
+        self.Mmax0 = M * 2 # For pruning
         self.ef_construction = ef_construction  # Size of the dynamic candidate list during the construction phase.
         self.max_elements = max_elements  # Maximum capacity of the index.
         self.nodes = []  # Initializes an empty list to store the nodes.
@@ -91,17 +92,47 @@ class HNSWIndex:
         if self.enter_point is None:
             self.enter_point = node
             for i in range(self.max_layer + 1):
-                node.neighbors[i] = []
+                 node.neighbors[i] = []
+            for i in range(node_layer + 1):
+                 if i not in node.neighbors: # Should already be empty
+                      node.neighbors[i] = []
+
         else:
             current_node = self.enter_point
-            for layer in range(self.max_layer, -1, -1):
-                if layer > node_layer:
-                    current_node = self._search_layer(node, current_node, layer)
-                elif layer <= node_layer:
-                    neighbors = self._select_neighbors(node, current_node, layer)
-                    node.neighbors[layer] = neighbors
-                    for neighbor_id in neighbors:
-                        self.nodes[neighbor_id].neighbors[layer].append(node.id)
+            entry_points = {} # Store entry points found per layer
+
+            for layer in range(self.max_layer, node_layer, -1):
+                current_node = self._search_layer(node, current_node, layer)
+                entry_points[layer] = current_node # Remember entry for this layer
+
+            ep = current_node # Start with the lowest entry point found from above search
+            for layer in range(min(node_layer, self.max_layer), -1, -1):
+                start_node = entry_points.get(layer, ep)
+                neighbors = self._select_neighbors(node, start_node, layer) # Find M neighbors
+                node.neighbors[layer] = neighbors # Connect new node to neighbors
+                layer_M = self.Mmax0 if layer == 0 else self.M
+
+                for neighbor_id in neighbors:
+                    if neighbor_id < 0 or neighbor_id >= len(self.nodes):
+                         print(f"Warning: Invalid neighbor_id {neighbor_id} encountered during insertion of node {node.id}")
+                         continue
+
+                    neighbor_node = self.nodes[neighbor_id]
+
+                    if layer not in neighbor_node.neighbors:
+                        neighbor_node.neighbors[layer] = [] # Ensure list exists
+
+                    neighbor_node.neighbors[layer].append(node.id)
+
+                    # Pruning
+                    if len(neighbor_node.neighbors[layer]) > layer_M:
+                        neighbor_vec = neighbor_node.data
+                        connection_ids = neighbor_node.neighbors[layer]
+                        connection_vectors = np.array([self.nodes[cnx_id].data for cnx_id in connection_ids])
+                        distances = _square_distances(connection_vectors, neighbor_vec)
+                        sorted_indices = np.argsort(distances)
+                        pruned_neighbor_ids = [connection_ids[i] for i in sorted_indices[:layer_M]]
+                        neighbor_node.neighbors[layer] = pruned_neighbor_ids
 
     def _search_layer(self, target_node, entry_node, layer):
         """
